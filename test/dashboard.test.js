@@ -125,3 +125,14 @@ test("owner's picks: each listed folder becomes one post with its slides in orde
   assert.equal(picks[1].when, null);
   assert.deepEqual(agent.readPicks('nope', files).problems, ['picks.json is not valid JSON']);
 });
+
+test('publishing: a refused key leaves approved posts waiting instead of marking them failed', async () => {
+  const finished = [];
+  site._setFetch(async (url, o) => {
+    if (o.method === 'GET') return { ok: true, json: async () => ({ approvals: url.includes('kind=social_post') ? [{ id: 5, payload: post }] : [] }) };
+    finished.push(JSON.parse(o.body)); return { ok: true, json: async () => ({}) };
+  });
+  up._setFetch(async () => ({ ok: false, status: 401, json: async () => ({ message: 'Invalid API key' }) }));
+  const r = await jobs.publishApproved();
+  assert.deepEqual([r.sent, r.failed, r.waiting, finished.length], [0, 0, 1, 0]);
+});
