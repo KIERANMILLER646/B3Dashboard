@@ -32,8 +32,8 @@ test('photos, text and scheduling; anything odd is refused before it is sent', (
 test('publishing: approved items are sent once each and reported back; a bad one is marked failed and the rest carry on', async () => {
   const calls = []; const finished = [];
   site._setFetch(async (url, o) => {
-    if (url.includes('agent/approvals?')) return { ok: true, json: async () => ({ approvals: url.includes('kind=social_post') ? [{ id: 1, payload: post }, { id: 2, payload: { ...post, caption: '' } }] : [] }) };
-    if (url.endsWith('agent/approvals/result')) { finished.push(JSON.parse(o.body)); return { ok: true, json: async () => ({}) }; }
+    if (url.includes('path=agent%2Fapprovals&')) return { ok: true, json: async () => ({ approvals: url.includes('kind=social_post') && url.startsWith('https://b3golf.co.uk/api/booking/?path=') ? [{ id: 1, payload: post }, { id: 2, payload: { ...post, caption: '' } }] : [] }) };
+    if (url.endsWith('path=agent%2Fapprovals%2Fresult')) { finished.push(JSON.parse(o.body)); return { ok: true, json: async () => ({}) }; }
     throw new Error('unexpected ' + url);
   });
   up._setFetch(async (url, o) => { calls.push({ url, key: o.headers['Idempotency-Key'], auth: o.headers.Authorization.split(' ')[0] }); return { ok: true, json: async () => ({ request_id: 'r1' }) }; });
