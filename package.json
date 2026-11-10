@@ -1,0 +1,7 @@
+{
+  "name": "b3-dashboard",
+  "private": true,
+  "description": "B3 Golf dashboard services: publishes approved posts and collects marketing numbers",
+  "engines": { "node": "22.x" },
+  "scripts": { "test": "node --test test/*.test.js" }
+}
