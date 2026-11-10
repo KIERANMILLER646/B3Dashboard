@@ -111,3 +111,17 @@ test('content agent: only offered, non-held photos can be used, and drafts go to
   assert.equal(p.payload.media[0].url, 'https://www.dropbox.com/scl/fi/x/a.jpg?rlkey=1&raw=1'); assert.equal(p.payload.scheduled_for, undefined);   // that day was taken
   assert.doesNotThrow(() => up.buildPost(p.payload, { id: 1, now }));
 });
+
+test("owner's picks: each listed folder becomes one post with its slides in order, held folders refused", () => {
+  const f = (path) => ({ path, name: path.split('/').pop(), kind: path.endsWith('.json') ? 'other' : 'photo', size: 5 });
+  const files = ['/Socials/S/p11-putting/p11-putting-10.jpg', '/Socials/S/p11-putting/p11-putting-2.jpg', '/Socials/S/p11-putting/p11-putting-1.jpg', '/Socials/S/p11-putting/sub/x.jpg', '/_Duplicates/a.jpg', '/Plan/picks.json'].map(f);
+  const now = new Date('2031-01-01T10:00:00Z');
+  const text = JSON.stringify({ posts: [
+    { key: 'p11', title: 'Putting', caption: 'Four tasks.', folder: 'Socials/S/p11-putting', when: '2031-01-02T12:30:00Z', platforms: ['instagram', 'facebook', 'linkedin'] },
+    { key: 'dup', title: 'No', caption: 'x', folder: '_Duplicates' }, { key: 'phil', title: 'No', caption: 'x', folder: 'Phil' }, { key: 'none', title: 'No', caption: 'x', folder: 'Socials/S/missing' }, { key: 'old', title: 'Past', caption: 'x', folder: 'Socials/S/p11-putting', when: '2030-01-01T00:00:00Z' }] });
+  const { picks, problems } = agent.readPicks(text, files, { now });
+  assert.deepEqual(picks[0].paths, ['/Socials/S/p11-putting/p11-putting-1.jpg', '/Socials/S/p11-putting/p11-putting-2.jpg', '/Socials/S/p11-putting/p11-putting-10.jpg']);
+  assert.deepEqual([picks[0].platforms, picks[0].when, picks.length, problems.length], [['instagram', 'facebook'], '2031-01-02T12:30:00.000Z', 2, 3]);
+  assert.equal(picks[1].when, null);
+  assert.deepEqual(agent.readPicks('nope', files).problems, ['picks.json is not valid JSON']);
+});
