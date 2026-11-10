@@ -1,6 +1,8 @@
 {
+  "functions": { "api/cron/content.js": { "maxDuration": 300 } },
   "crons": [
     { "path": "/api/cron/metrics", "schedule": "20 5 * * *" },
+    { "path": "/api/cron/content", "schedule": "40 6 * * 1,4" },
     { "path": "/api/cron/publish", "schedule": "*/15 * * * *" }
   ]
 }
