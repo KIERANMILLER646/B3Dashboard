@@ -56,3 +56,18 @@ test('the scheduled routes only answer Vercel', () => {
   assert.equal(allowed({ headers: { authorization: `Bearer ${'c'.repeat(20)}` } }), true);
   assert.equal(allowed({ headers: { authorization: 'Bearer nope' } }), false); assert.equal(allowed({ headers: {} }), false);
 });
+
+test('Dropbox: files are sorted into kinds, and a link is made (or reused) in the form Upload-Post can fetch', async () => {
+  process.env.DROPBOX_APP_KEY = 'k'; process.env.DROPBOX_APP_SECRET = 's'; process.env.DROPBOX_REFRESH_TOKEN = 'r';
+  const dbx = require('../lib/dropbox'); const calls = [];
+  dbx._setFetch(async (url, o) => { calls.push(url.replace('https://api.dropboxapi.com/', ''));
+    if (url.endsWith('/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'a', expires_in: 3600 }) };
+    if (url.endsWith('files/list_folder')) return { ok: true, json: async () => ({ has_more: false, entries: [{ '.tag': 'folder', name: 'Photos' }, { '.tag': 'file', name: 'Bay 1.JPG', path_display: '/Photos/Bay 1.JPG', size: 5, server_modified: '2031-01-01T00:00:00Z' }, { '.tag': 'file', name: 'tip.mp4', path_display: '/Video/tip.mp4', size: 9 }, { '.tag': 'file', name: 'plan.md', path_display: '/Plan/plan.md', size: 2 }] }) };
+    if (url.endsWith('create_shared_link_with_settings')) return JSON.parse(o.body).path === '/Video/tip.mp4' ? { ok: false, status: 409, json: async () => ({ error_summary: 'shared_link_already_exists/..' }) } : { ok: true, json: async () => ({ url: 'https://www.dropbox.com/scl/fi/abc/Bay-1.JPG?rlkey=x&dl=0' }) };
+    if (url.endsWith('list_shared_links')) return { ok: true, json: async () => ({ links: [{ url: 'https://www.dropbox.com/scl/fi/def/tip.mp4?rlkey=y&dl=0' }] }) };
+    throw new Error('unexpected ' + url); });
+  assert.deepEqual((await dbx.listFiles()).map((f) => [f.path, f.kind]), [['/Photos/Bay 1.JPG', 'photo'], ['/Video/tip.mp4', 'video'], ['/Plan/plan.md', 'note']]);
+  assert.equal(await dbx.directLink('/Photos/Bay 1.JPG'), 'https://www.dropbox.com/scl/fi/abc/Bay-1.JPG?rlkey=x&raw=1');
+  assert.equal(await dbx.directLink('/Video/tip.mp4'), 'https://www.dropbox.com/scl/fi/def/tip.mp4?rlkey=y&raw=1');
+  assert.equal(calls.filter((c) => c === 'oauth2/token').length, 1);     // one sign-in, reused
+});
