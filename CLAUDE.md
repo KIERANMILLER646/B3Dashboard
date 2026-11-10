@@ -8,4 +8,4 @@ Private services behind the B3 Golf dashboard. Separate from the B3 website repo
 - **TikTok goes to drafts** unless `TIKTOK_MODE=direct` is set by the owner.
 - No customer or staff names in anything this project stores or sends: totals only.
 - Before pushing: `npm test`. UK English.
-- **The content agent (`lib/agent.js`) only drafts.** It proposes to the queue and may use only photos that are in the Dropbox app folder. Folders starting with `_`, anything marked junior or kids (until parental consent is confirmed) and Phil's folder are never posted from.
+- **The content agent (`lib/agent.js`) only drafts.** It proposes to the queue and may use only photos that are in the Dropbox app folder. Folders starting with `_` and Phil's folder are never posted from. Junior photos may be used (the owner confirmed on 10 Nov 2026 that everything in the folder has parental consent), but a child is never named.

@@ -78,13 +78,13 @@ test('content agent: only offered, non-held photos can be used, and drafts go to
   const f = (path, kind = 'photo', size = 10) => ({ path, name: path.split('/').pop(), kind, size });
   const files = [f('/Photos/a.jpg'), f('/Photos/Juniors/k.jpg'), f('/Photos/kids-golf.jpg'), f('/_Duplicates - safe to delete/a (1).jpg'), f('/Phil/guide.pdf', 'document'),
     f('/Socials/Set/p01-launch/p01-launch-1.jpg'), f('/Socials/Set/p06-juniors/p06-juniors-1.jpg'), f('/Brand/logo.png'), f('/Video/Lessons/x.mp4', 'video'), f('/Socials/Set/captions.md', 'note'), f('/Phil/notes.md', 'note')];
-  assert.deepEqual(agent.usablePhotos(files).map((x) => x.path), ['/Photos/a.jpg', '/Socials/Set/p01-launch/p01-launch-1.jpg']);
+  assert.deepEqual(agent.usablePhotos(files).map((x) => x.path), ['/Photos/a.jpg', '/Photos/Juniors/k.jpg', '/Photos/kids-golf.jpg', '/Socials/Set/p01-launch/p01-launch-1.jpg', '/Socials/Set/p06-juniors/p06-juniors-1.jpg']);
   assert.deepEqual(agent.notesIn(files).map((x) => x.path), ['/Socials/Set/captions.md']);
   const allowed = ['/Photos/a.jpg', '/Photos/b.jpg']; const now = new Date('2031-01-01T10:00:00Z');
   const ok = agent.checkDraft({ title: 'T', caption: 'C', media_paths: ['/photos/A.jpg'], platforms: ['instagram', 'tiktok'], day: '2031-01-03' }, allowed, { now });
   assert.deepEqual([ok.paths, ok.platforms, ok.when], [['/Photos/a.jpg'], ['instagram'], '2031-01-03T18:00:00.000Z']);
   assert.equal(agent.checkDraft({ title: 'T', caption: 'C', media_paths: ['/Photos/a.jpg'], day: '2030-12-01' }, allowed, { now }).when, null);
-  for (const bad of [{ title: 'T', caption: 'C', media_paths: ['/Photos/Juniors/k.jpg'] }, { title: 'T', caption: 'C', media_paths: [] }, { title: '', caption: 'C', media_paths: allowed }, { title: 'T', caption: 'C', media_paths: allowed, platforms: ['tiktok'] }, null]) assert.equal(agent.checkDraft(bad, allowed, { now }), null);
+  for (const bad of [{ title: 'T', caption: 'C', media_paths: ['/Phil/guide.jpg'] }, { title: 'T', caption: 'C', media_paths: [] }, { title: '', caption: 'C', media_paths: allowed }, { title: 'T', caption: 'C', media_paths: allowed, platforms: ['tiktok'] }, null]) assert.equal(agent.checkDraft(bad, allowed, { now }), null);
   assert.equal(agent.keyFor(['/b', '/A'], 'x'), agent.keyFor(['/a', '/B'], 'y'));
 
   process.env.ANTHROPIC_API_KEY = 'a'.repeat(20); process.env.DROPBOX_APP_KEY = 'k'; process.env.DROPBOX_APP_SECRET = 's'; process.env.DROPBOX_REFRESH_TOKEN = 'r';
@@ -95,17 +95,17 @@ test('content agent: only offered, non-held photos can be used, and drafts go to
   });
   dbx._setFetch(async (url, o) => {
     if (url.includes('oauth2/token')) return { ok: true, json: async () => ({ access_token: 't', expires_in: 3600 }) };
-    if (url.endsWith('files/list_folder')) return { ok: true, json: async () => ({ has_more: false, entries: ['/Photos/a.jpg', '/Photos/old.jpg', '/Photos/Juniors/k.jpg'].map((p) => ({ '.tag': 'file', path_display: p, name: p.split('/').pop(), size: 5 })) }) };
+    if (url.endsWith('files/list_folder')) return { ok: true, json: async () => ({ has_more: false, entries: ['/Photos/a.jpg', '/Photos/old.jpg', '/_Duplicates/k.jpg'].map((p) => ({ '.tag': 'file', path_display: p, name: p.split('/').pop(), size: 5 })) }) };
     if (url.includes('get_thumbnail_v2')) return { ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer };
     if (url.endsWith('create_shared_link_with_settings')) return { ok: true, json: async () => ({ url: 'https://www.dropbox.com/scl/fi/x/a.jpg?rlkey=1&dl=0' }) };
     throw new Error('unexpected ' + url);
   });
   agent._setFetch(async (url, o) => { asked = JSON.parse(o.body); return { ok: true, json: async () => ({ content: [{ type: 'tool_use', input: { posts: [
-    { title: 'Bay photo', caption: 'A look inside.', media_paths: ['/Photos/a.jpg'], day: '2031-01-03', why: 'New.' }, { title: 'Sneaky', caption: 'x', media_paths: ['/Photos/Juniors/k.jpg'], day: '2031-01-05' }] } }] }) }; });
+    { title: 'Bay photo', caption: 'A look inside.', media_paths: ['/Photos/a.jpg'], day: '2031-01-03', why: 'New.' }, { title: 'Sneaky', caption: 'x', media_paths: ['/_Duplicates/k.jpg'], day: '2031-01-05' }] } }] }) }; });
   const r = await agent.draftPosts(now);
   assert.deepEqual([r.proposed, r.skipped], [1, 1]);
   assert.equal(asked.messages[0].content.filter((c) => c.type === 'image').length, 1);          // only the unused, non-held photo is shown
-  assert.ok(!JSON.stringify(asked).includes('Juniors'));
+  assert.ok(!JSON.stringify(asked.messages).includes('_Duplicates'));
   const p = proposed[0];
   assert.deepEqual([p.kind, p.source, p.customer_facing, p.payload.platforms, p.payload.source_paths], ['social_post', 'content-agent', true, ['instagram', 'facebook'], ['/Photos/a.jpg']]);
   assert.equal(p.payload.media[0].url, 'https://www.dropbox.com/scl/fi/x/a.jpg?rlkey=1&raw=1'); assert.equal(p.payload.scheduled_for, undefined);   // that day was taken
