@@ -274,3 +274,15 @@ test('metrics route: a run that collected nothing because a source refused is re
   } finally { [console.log, console.error] = orig; }
   assert.equal(logs.length, 2); assert.match(logs[0], /nothing collected.*analytics: 401/); assert.match(logs[1], /^metrics job/);
 });
+
+test('Dropbox connect page: once connected it says so without listing the folder, unless the request carries the cron secret', async () => {
+  process.env.DROPBOX_APP_KEY = 'k'; process.env.DROPBOX_APP_SECRET = 's'; process.env.DROPBOX_REFRESH_TOKEN = 'r';
+  const route = require('../api/dropbox/connect'); const calls = [];
+  dbx._setFetch(async (url) => { calls.push(url);
+    if (url.includes('oauth2/token')) return { ok: true, json: async () => ({ access_token: 't', expires_in: 3600 }) };
+    return { ok: true, json: async () => ({ has_more: false, entries: [{ '.tag': 'file', path_display: '/Photos/a.jpg', name: 'a.jpg', size: 5 }] }) }; });
+  const open = fakeRes(); await route({ headers: { host: 'x.example.test' } }, open);
+  assert.equal(open.statusCode, 200); assert.match(open.body, /Dropbox is connected/); assert.doesNotMatch(open.body, /photos/); assert.equal(calls.length, 0);
+  const owner = fakeRes(); await route({ headers: { host: 'x.example.test', authorization: `Bearer ${'c'.repeat(20)}` } }, owner);
+  assert.match(owner.body, /1 photos/); assert.ok(calls.length > 0);
+});
