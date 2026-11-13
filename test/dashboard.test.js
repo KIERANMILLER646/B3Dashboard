@@ -229,3 +229,31 @@ test('content agent: a reply with no drafts is asked again once, then reported w
   const big = agent.capText([{ type: 'text', text: 'x'.repeat(200000) }, { type: 'text', text: 'y' }]);
   assert.ok(big[0].text.length < 150020 && big[0].text.endsWith('[cut short]')); assert.equal(big[1].text, 'y');
 });
+
+test('content agent: drafts may use only photos Claude was shown or designed sets, and photos already queued are not queued again', async () => {
+  const paths = ['/Photos/a.jpg', '/Photos/b.jpg', '/Photos/nopreview.jpg', '/Socials/Set/p01/p01-1.jpg', '/Socials/Set/p01/p01-2.jpg', '/Testimonials/t.jpg'];
+  const pick = { kind: 'social_post', status: 'pending', source: 'content-agent', title: "Owner's pick", payload: { source_paths: ['/Socials/Set/p01/p01-1.jpg', '/Socials/Set/p01/p01-2.jpg'] } };
+  const { r, proposed, asked } = await agentRun({ approvals: [pick], paths, thumbsFail: ['/Photos/nopreview.jpg'], replies: [tool([
+    { title: 'Unseen', caption: 'From the file name.', media_paths: ['/Photos/nopreview.jpg'], day: '2031-01-03' },
+    { title: 'Same set again', caption: 'Launch.', media_paths: ['/Socials/Set/p01/p01-1.jpg', '/Socials/Set/p01/p01-2.jpg'], day: '2031-01-04' },
+    { title: 'Seen', caption: 'Bays at night.', media_paths: ['/Photos/a.jpg', '/Photos/b.jpg'], day: '2031-01-05' }])] });
+  assert.deepEqual([r.proposed, r.skipped], [1, 2]);
+  assert.deepEqual(r.items.slice(0, 2), [{ skipped: 'uses a photo Claude was not shown' }, { skipped: 'already queued' }]);
+  assert.deepEqual(proposed.map((p) => p.payload.source_paths), [['/Photos/a.jpg', '/Photos/b.jpg']]);
+  const listed = asked[0].messages[0].content[0].text;
+  assert.ok(!listed.includes('nopreview') && !listed.includes('Testimonials') && listed.includes('* /Socials/Set/p01/p01-1.jpg'));
+});
+
+test('content agent: "ask for changes" sends the note back and replaces the draft with a revision; a twice-revised draft is left and not counted', async () => {
+  const changes = (id, revision, extra = {}) => ({ id, kind: 'social_post', status: 'changes', source: 'content-agent', revision, title: 'Bay photo', decision_note: 'Mention the coaching, drop the hashtags.',
+    payload: { caption: 'A look inside. #golf', source_paths: ['/Photos/a.jpg'], scheduled_for: '2031-01-03T18:00:00Z' }, ...extra });
+  const pending = [1, 2, 3, 4, 5].map((id) => ({ id: 10 + id, kind: 'social_post', status: 'pending', source: 'content-agent', title: 'P', payload: {} }));
+  const { r, proposed, asked } = await agentRun({ approvals: [changes(7, 1), changes(8, 3), changes(9, 1, { source: 'someone-else' }), ...pending], paths: ['/Photos/a.jpg', '/Photos/b.jpg'],
+    replies: [tool([{ title: 'Bay photo', caption: 'A look inside, where the coaching happens.', media_paths: ['/Photos/a.jpg'], day: '2031-01-03' }]), tool([{ title: 'New', caption: 'x', media_paths: ['/Photos/b.jpg'], day: '2031-01-06' }])] });
+  assert.equal(asked.length, 1);                                                   // only item 7 is revised; then 5 pending + 1 revised = 6, so nothing new
+  assert.match(asked[0].messages[0].content[0].text, /Mention the coaching, drop the hashtags\./);
+  assert.equal(asked[0].messages[0].content.filter((c) => c.type === 'image').length, 1);
+  assert.deepEqual(proposed.map((p) => [p.revises, p.dedupe_key, p.payload.caption, p.payload.scheduled_for]), [[7, undefined, 'A look inside, where the coaching happens.', '2031-01-03T18:00:00.000Z']]);
+  assert.deepEqual(r.revisions, [{ id: 7, revised: true }]);
+  assert.equal(r.reason, '6 drafts are already waiting for a decision.');
+});
