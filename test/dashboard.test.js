@@ -257,3 +257,20 @@ test('content agent: "ask for changes" sends the note back and replaces the draf
   assert.deepEqual(r.revisions, [{ id: 7, revised: true }]);
   assert.equal(r.reason, '6 drafts are already waiting for a decision.');
 });
+
+const fakeRes = () => { const r = { headers: {}, setHeader: (k, v) => { r.headers[k] = v; }, end: (b) => { r.body = b; } }; return r; };
+test('metrics route: a run that collected nothing because a source refused is reported as failed and logged', async () => {
+  const route = require('../api/cron/metrics');
+  const req = { headers: { authorization: `Bearer ${'c'.repeat(20)}` } };
+  const logs = []; const orig = [console.log, console.error]; console.log = console.error = (...a) => logs.push(a.join(' '));
+  try {
+    up._setFetch(async () => ({ ok: false, status: 401, json: async () => ({ message: 'Invalid API key' }) }));
+    const bad = fakeRes(); await route(req, bad);
+    assert.equal(bad.statusCode, 502); assert.deepEqual(JSON.parse(bad.body).problems, ['analytics: 401', 'reviews: 401']);
+    up._setFetch(async (url) => ({ ok: true, json: async () => (url.includes('reviews') ? { success: true, totalReviewCount: 3, averageRating: 5 } : {}) }));
+    site._setFetch(async (url, o) => ({ ok: true, json: async () => ({ stored: JSON.parse(o.body).rows.length }) }));
+    const good = fakeRes(); await route(req, good);
+    assert.equal(good.statusCode, 200); assert.equal(JSON.parse(good.body).stored, 2);
+  } finally { [console.log, console.error] = orig; }
+  assert.equal(logs.length, 2); assert.match(logs[0], /nothing collected.*analytics: 401/); assert.match(logs[1], /^metrics job/);
+});
