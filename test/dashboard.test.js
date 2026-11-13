@@ -197,3 +197,35 @@ test('publishing: a refused key leaves approved posts waiting instead of marking
   const { r, finished, uploads } = await runPublish([{ id: 5, payload: post }], () => ({ httpStatus: 401, message: 'Invalid API key' }));
   assert.deepEqual([r.sent, r.failed, r.waiting, finished.length, uploads.length], [0, 0, 1, 0, 0]);
 });
+
+// A Dropbox folder, a queue and a Claude for the content agent. `replies` are Claude's answers, in order.
+async function agentRun({ approvals = [], paths = ['/Photos/a.jpg'], replies, now = new Date('2031-01-01T10:00:00Z'), thumbsFail = [] }) {
+  process.env.ANTHROPIC_API_KEY = 'a'.repeat(20); process.env.DROPBOX_APP_KEY = 'k'; process.env.DROPBOX_APP_SECRET = 's'; process.env.DROPBOX_REFRESH_TOKEN = 'r';
+  const proposed = [], asked = [];
+  site._setFetch(async (url, o) => {
+    if (o.method === 'GET') return { ok: true, json: async () => ({ approvals }) };
+    proposed.push(JSON.parse(o.body)); return { ok: true, json: async () => ({ created: true, approval: { id: 100 + proposed.length } }) };
+  });
+  dbx._setFetch(async (url, o) => {
+    if (url.includes('oauth2/token')) return { ok: true, json: async () => ({ access_token: 't', expires_in: 3600 }) };
+    if (url.endsWith('files/list_folder')) return { ok: true, json: async () => ({ has_more: false, entries: paths.map((p) => ({ '.tag': 'file', path_display: p, name: p.split('/').pop(), size: 5 })) }) };
+    if (url.includes('get_thumbnail_v2')) { const p = JSON.parse(o.headers['Dropbox-API-Arg']).resource.path; return thumbsFail.includes(p) ? { ok: false, status: 409 } : { ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }; }
+    if (url.endsWith('create_shared_link_with_settings')) return { ok: true, json: async () => ({ url: 'https://www.dropbox.com/scl/fi/x/a.jpg?rlkey=1&dl=0' }) };
+    throw new Error('unexpected ' + url);
+  });
+  const queue = [...replies];
+  agent._setFetch(async (url, o) => { asked.push(JSON.parse(o.body)); const r = queue.shift(); return { ok: true, json: async () => r }; });
+  return { r: await agent.draftPosts(now), proposed, asked };
+}
+const tool = (posts, extra = {}) => ({ content: [{ type: 'tool_use', input: { posts } }], stop_reason: 'tool_use', usage: { input_tokens: 1000, output_tokens: 200 }, ...extra });
+
+test('content agent: a reply with no drafts is asked again once, then reported with its reason; token use is recorded', async () => {
+  const text = { content: [{ type: 'text', text: 'Here are some ideas...' }], stop_reason: 'end_turn', usage: { input_tokens: 900, output_tokens: 50 } };
+  const twice = await agentRun({ replies: [text, { ...text, stop_reason: 'max_tokens' }] });
+  assert.equal(twice.asked.length, 2); assert.match(JSON.stringify(twice.asked[1].messages), /Reminder: reply only by calling/);
+  assert.deepEqual([twice.r.proposed, twice.r.reason, twice.r.usage], [0, 'Claude answered without drafts (stop_reason max_tokens), twice.', { input_tokens: 1800, output_tokens: 100 }]);
+  const second = await agentRun({ replies: [text, tool([{ title: 'Bay', caption: 'A look inside.', media_paths: ['/Photos/a.jpg'], day: '2031-01-03' }])] });
+  assert.deepEqual([second.r.proposed, second.r.reason, second.r.usage.input_tokens], [1, undefined, 1900]);
+  const big = agent.capText([{ type: 'text', text: 'x'.repeat(200000) }, { type: 'text', text: 'y' }]);
+  assert.ok(big[0].text.length < 150020 && big[0].text.endsWith('[cut short]')); assert.equal(big[1].text, 'y');
+});
