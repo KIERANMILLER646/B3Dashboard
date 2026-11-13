@@ -87,6 +87,10 @@ test('publishing: a scheduled post waits in the queue until it is due, then goes
   assert.deepEqual([later.r.scheduled, later.uploads.length, later.finished.length], [1, 0, 0]);
   const due = await runPublish([{ id: 1, payload: { ...ig, scheduled_for: '2031-01-10T12:00:00Z' }, decided_at: '2031-01-09T10:00:00Z' }], () => null, now);
   assert.deepEqual([due.r.sent, due.uploads, due.finished.length], [1, ['https://api.upload-post.com/api/upload_photos'], 0]);
+  assert.equal(due.r.stuck, 0);
+  up._setFetch(async (url) => (url.includes('status') ? { ok: false, status: 404, json: async () => ({}) } : { ok: true, json: async () => ({ request_id: 'their-own-uuid' }) }));
+  const other = await jobs.publishApproved(now);
+  assert.deepEqual([other.sent, other.stuck], [1, 1]); assert.match(other.problem, /did not keep our request id/);
 });
 
 test('publishing: a post that could not go out in time is failed, not sent late; a long outage is reported, a blip is not', async () => {
