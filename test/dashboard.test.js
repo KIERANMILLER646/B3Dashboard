@@ -29,19 +29,86 @@ test('photos, text and scheduling; anything odd is refused before it is sent', (
     { ...post, media: [] }, { ...post, media: [post.media[0], post.media[0]] }, { ...post, scheduled_for: 'soon' }, null]) assert.throws(() => up.buildPost(bad, { id: 1 }), up.PostError);
 });
 
-test('publishing: approved items are sent once each and reported back; a bad one is marked failed and the rest carry on', async () => {
+test('publishing: an approved item is sent once, with our own request id; a bad one is marked failed and the rest carry on', async () => {
   const calls = []; const finished = [];
   site._setFetch(async (url, o) => {
     if (url.includes('path=agent%2Fapprovals&')) return { ok: true, json: async () => ({ approvals: url.includes('kind=social_post') && url.startsWith('https://b3golf.co.uk/api/booking/?path=') ? [{ id: 1, payload: post }, { id: 2, payload: { ...post, caption: '' } }] : [] }) };
     if (url.endsWith('path=agent%2Fapprovals%2Fresult')) { finished.push(JSON.parse(o.body)); return { ok: true, json: async () => ({}) }; }
     throw new Error('unexpected ' + url);
   });
-  up._setFetch(async (url, o) => { calls.push({ url, key: o.headers['Idempotency-Key'], auth: o.headers.Authorization.split(' ')[0] }); return { ok: true, json: async () => ({ request_id: 'r1' }) }; });
+  up._setFetch(async (url, o) => {
+    calls.push({ url, method: o.method, key: o.headers['Idempotency-Key'], req: o.headers['X-Request-Id'], auth: o.headers.Authorization.split(' ')[0], form: o.body ? form(o.body) : null });
+    if (url.includes('uploadposts/status')) return { ok: false, status: 404, json: async () => ({ status: 'not_found' }) };
+    return { ok: true, json: async () => ({ request_id: 'b3-approval-1' }) };
+  });
   const r = await jobs.publishApproved();
-  assert.deepEqual({ sent: r.sent, failed: r.failed }, { sent: 1, failed: 1 });
-  assert.deepEqual(calls, [{ url: 'https://api.upload-post.com/api/upload', key: 'b3-approval-1', auth: 'Apikey' }]);
-  assert.equal(finished[0].ok, true); assert.equal(finished[0].result.tiktok_draft, true); assert.match(finished[0].result.note, /drafts/);
-  assert.deepEqual(finished[1], { id: 2, ok: false, result: { reason: 'The post has no caption.' } });
+  assert.deepEqual({ sent: r.sent, failed: r.failed, done: r.done }, { sent: 1, failed: 1, done: 0 });
+  assert.deepEqual(calls.map((c) => [c.method, c.url]), [['GET', 'https://api.upload-post.com/api/uploadposts/status?request_id=b3-approval-1'], ['POST', 'https://api.upload-post.com/api/upload'], ['GET', 'https://api.upload-post.com/api/uploadposts/status?request_id=b3-approval-2']]);
+  assert.deepEqual([calls[1].key, calls[1].req, calls[1].auth, calls[1].form.request_id], ['b3-approval-1', 'b3-approval-1', 'Apikey', ['b3-approval-1']]);
+  assert.deepEqual(finished, [{ id: 2, ok: false, result: { reason: 'The post has no caption.' } }]);   // the sent one is not Done until Upload-Post says so
+});
+
+// A tiny queue and Upload-Post for the publish job: `items` are the approved rows, `statusFor(id)` what Upload-Post says.
+async function runPublish(items, statusFor, now = new Date('2031-01-10T12:00:00Z')) {
+  const finished = [], uploads = [];
+  site._setFetch(async (url, o) => {
+    if (o.method === 'GET') return { ok: true, json: async () => ({ approvals: url.includes('kind=social_post') ? items : [] }) };
+    finished.push(JSON.parse(o.body)); return { ok: true, json: async () => ({}) };
+  });
+  up._setFetch(async (url, o) => {
+    if (url.includes('uploadposts/status')) { const s = await statusFor(Number(url.split('b3-approval-')[1])); return s ? { ok: s.httpStatus ? false : true, status: s.httpStatus || 200, json: async () => s } : { ok: false, status: 404, json: async () => ({ status: 'not_found' }) }; }
+    uploads.push(url); return { ok: true, json: async () => ({}) };
+  });
+  return { r: await jobs.publishApproved(now), finished, uploads };
+}
+const ig = { platforms: ['instagram', 'facebook'], caption: 'Bay 3 at dusk.', media: [{ type: 'photo', url: 'https://x.example.test/1.jpg' }] };
+
+test("publishing: Done only when every network posted; a failed or skipped network makes it Failed, with what did post", async () => {
+  const st = {
+    1: { status: 'completed', results: [{ platform: 'instagram', success: true, post_url: 'https://instagram.example.test/p/1' }, { platform: 'facebook', success: true }] },
+    2: { status: 'completed', results: [{ platform: 'instagram', success: false, message: 'Media URL could not be fetched' }, { platform: 'facebook', success: true }] },
+    3: { status: 'completed', results: [{ platform: 'instagram', success: true }, { platform: 'facebook', success: true, skipped: true, skip_reason: 'profile_platform_not_configured' }] },
+    4: { status: 'failed', message: 'Upload appears to have failed (no activity for over 1 hour)', results: [] },
+    5: { status: 'in_progress', results: [{ platform: 'instagram', success: true, message: 'Queued' }] },
+  };
+  const { r, finished, uploads } = await runPublish([1, 2, 3, 4, 5].map((id) => ({ id, payload: ig })), (id) => st[id]);
+  assert.deepEqual([r.done, r.failed, r.checking, r.sent, uploads.length], [1, 3, 1, 0, 0]);
+  const by = Object.fromEntries(finished.map((f) => [f.id, f]));
+  assert.equal(by[1].ok, true); assert.equal(by[1].result.note, 'Instagram and Facebook posted.'); assert.equal(by[1].result.networks[0].post_url, 'https://instagram.example.test/p/1');
+  assert.deepEqual([by[2].ok, by[2].result.partial, by[2].result.reason], [false, true, 'Partly posted: Facebook posted; Instagram failed: Media URL could not be fetched.']);
+  assert.deepEqual([by[3].ok, by[3].result.reason], [false, 'Partly posted: Instagram posted; Facebook failed: no account connected to the B3 profile.']);
+  assert.match(by[4].result.reason, /^Not posted: Instagram failed: Upload appears to have failed/);
+  assert.equal(by[5], undefined);                                                       // still working: left approved, checked next run
+});
+
+test('publishing: a scheduled post waits in the queue until it is due, then goes out once', async () => {
+  const now = new Date('2031-01-10T12:00:00Z');
+  const later = await runPublish([{ id: 1, payload: { ...ig, scheduled_for: '2031-01-11T18:00:00Z' }, decided_at: '2031-01-09T10:00:00Z' }], () => { throw new Error('should not ask'); }, now);
+  assert.deepEqual([later.r.scheduled, later.uploads.length, later.finished.length], [1, 0, 0]);
+  const due = await runPublish([{ id: 1, payload: { ...ig, scheduled_for: '2031-01-10T12:00:00Z' }, decided_at: '2031-01-09T10:00:00Z' }], () => null, now);
+  assert.deepEqual([due.r.sent, due.uploads, due.finished.length], [1, ['https://api.upload-post.com/api/upload_photos'], 0]);
+});
+
+test('publishing: a post that could not go out in time is failed, not sent late; a long outage is reported, a blip is not', async () => {
+  const now = new Date('2031-01-10T12:00:00Z');
+  const old = await runPublish([{ id: 1, payload: ig, decided_at: '2031-01-07T09:00:00Z' }, { id: 2, payload: { ...ig, scheduled_for: '2031-01-08T18:00:00Z' }, decided_at: '2031-01-05T09:00:00Z' }, { id: 3, payload: ig, decided_at: '2031-01-10T09:00:00Z' }], () => null, now);
+  assert.deepEqual([old.r.failed, old.r.sent, old.uploads.length], [2, 1, 1]);
+  assert.ok(old.finished.every((f) => f.ok === false && f.result.too_late && /Nothing was posted/.test(f.result.reason)));
+  const down = { httpStatus: 503, message: 'Service unavailable' };
+  const blip = await runPublish([{ id: 1, payload: ig, decided_at: '2031-01-10T11:50:00Z' }], () => down, now);
+  assert.deepEqual([blip.r.waiting, blip.r.stuck, blip.finished.length], [1, 0, 0]);
+  const stuck = await runPublish([{ id: 1, payload: ig, decided_at: '2031-01-10T08:00:00Z' }], () => down, now);
+  assert.deepEqual([stuck.r.waiting, stuck.r.stuck, stuck.r.stuck_since, stuck.finished.length], [1, 1, '2031-01-10T08:00:00.000Z', 0]);
+  // Only a dropped connection counts as an outage; any other error without a status fails the item with its reason.
+  assert.equal(jobs.isOutage(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } })), true);
+  assert.equal(jobs.isOutage(new TypeError('Cannot read properties of undefined')), false);
+  const bug = await runPublish([{ id: 1, payload: ig, decided_at: '2031-01-10T11:50:00Z' }], () => { throw new TypeError('Cannot read properties of undefined'); }, now);
+  assert.deepEqual([bug.r.failed, bug.finished[0].ok], [1, false]); assert.match(bug.finished[0].result.reason, /^Could not send: Cannot read/);
+});
+
+test('publishing: the TikTok drafts note is kept once TikTok has the post', async () => {
+  const { finished } = await runPublish([{ id: 4, payload: { ...post, platforms: ['tiktok'] } }], () => ({ status: 'completed', results: [{ platform: 'tiktok', status: 'completed', success: true }] }));
+  assert.equal(finished[0].ok, true); assert.match(finished[0].result.note, /^TikTok posted\. TikTok: sent to drafts/);
 });
 
 test('numbers: followers today, complete days only from the daily series, reviews when there are any', () => {
@@ -127,12 +194,6 @@ test("owner's picks: each listed folder becomes one post with its slides in orde
 });
 
 test('publishing: a refused key leaves approved posts waiting instead of marking them failed', async () => {
-  const finished = [];
-  site._setFetch(async (url, o) => {
-    if (o.method === 'GET') return { ok: true, json: async () => ({ approvals: url.includes('kind=social_post') ? [{ id: 5, payload: post }] : [] }) };
-    finished.push(JSON.parse(o.body)); return { ok: true, json: async () => ({}) };
-  });
-  up._setFetch(async () => ({ ok: false, status: 401, json: async () => ({ message: 'Invalid API key' }) }));
-  const r = await jobs.publishApproved();
-  assert.deepEqual([r.sent, r.failed, r.waiting, finished.length], [0, 0, 1, 0]);
+  const { r, finished, uploads } = await runPublish([{ id: 5, payload: post }], () => ({ httpStatus: 401, message: 'Invalid API key' }));
+  assert.deepEqual([r.sent, r.failed, r.waiting, finished.length, uploads.length], [0, 0, 1, 0, 0]);
 });
